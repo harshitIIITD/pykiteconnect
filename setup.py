@@ -11,6 +11,7 @@ about = {}
 with open(os.path.join(current_dir, "kiteconnect", "__version__.py"), "r", "utf-8") as f:
     exec(f.read(), about)
 
+
 with io.open('README.md', 'rt', encoding='utf8') as f:
     readme = f.read()
 
