@@ -710,7 +710,7 @@ class KiteTicker(object):
     def _parse_text_message(self, payload):
         """Parse text message."""
         # Decode unicode data
-        if not six.PY2 and type(payload) == bytes:
+        if not six.PY2 and isinstance(payload, (bytes, bytearray)):
             payload = payload.decode("utf-8")
 
         try:

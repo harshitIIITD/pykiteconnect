@@ -428,10 +428,12 @@ class KiteConnect(object):
     def _format_response(self, data):
         """Parse and format responses."""
 
-        if type(data) == list:
+        if isinstance(data, list):
             _list = data
-        elif type(data) == dict:
+        elif isinstance(data, dict):
             _list = [data]
+        else:
+            return data
 
         for item in _list:
             # Convert date time string to datetime object
@@ -439,7 +441,7 @@ class KiteConnect(object):
                 if item.get(field) and len(item[field]) == 19:
                     item[field] = dateutil.parser.parse(item[field])
 
-        return _list[0] if type(data) == dict else _list
+        return _list[0] if isinstance(data, dict) else _list
 
     # orderbook and tradebook
     def orders(self):
@@ -607,7 +609,7 @@ class KiteConnect(object):
         ins = list(instruments)
 
         # If first element is a list then accept it as instruments list for legacy reason
-        if len(instruments) > 0 and type(instruments[0]) == list:
+        if len(instruments) > 0 and isinstance(instruments[0], list):
             ins = instruments[0]
 
         data = self._get("market.quote", params={"i": ins})
@@ -622,7 +624,7 @@ class KiteConnect(object):
         ins = list(instruments)
 
         # If first element is a list then accept it as instruments list for legacy reason
-        if len(instruments) > 0 and type(instruments[0]) == list:
+        if len(instruments) > 0 and isinstance(instruments[0], list):
             ins = instruments[0]
 
         return self._get("market.quote.ohlc", params={"i": ins})
@@ -636,7 +638,7 @@ class KiteConnect(object):
         ins = list(instruments)
 
         # If first element is a list then accept it as instruments list for legacy reason
-        if len(instruments) > 0 and type(instruments[0]) == list:
+        if len(instruments) > 0 and isinstance(instruments[0], list):
             ins = instruments[0]
 
         return self._get("market.quote.ltp", params={"i": ins})
@@ -657,8 +659,8 @@ class KiteConnect(object):
         - `oi` is a boolean flag to get open interest.
         """
         date_string_format = "%Y-%m-%d %H:%M:%S"
-        from_date_string = from_date.strftime(date_string_format) if type(from_date) == datetime.datetime else from_date
-        to_date_string = to_date.strftime(date_string_format) if type(to_date) == datetime.datetime else to_date
+        from_date_string = from_date.strftime(date_string_format) if isinstance(from_date, datetime.datetime) else from_date
+        to_date_string = to_date.strftime(date_string_format) if isinstance(to_date, datetime.datetime) else to_date
 
         data = self._get("market.historical",
                          url_args={"instrument_token": instrument_token, "interval": interval},
@@ -694,7 +696,7 @@ class KiteConnect(object):
         ins = list(instruments)
 
         # If first element is a list then accept it as instruments list for legacy reason
-        if len(instruments) > 0 and type(instruments[0]) == list:
+        if len(instruments) > 0 and isinstance(instruments[0], list):
             ins = instruments[0]
 
         return self._get("market.trigger_range",
@@ -711,7 +713,7 @@ class KiteConnect(object):
 
     def _get_gtt_payload(self, trigger_type, tradingsymbol, exchange, trigger_values, last_price, orders):
         """Get GTT payload"""
-        if type(trigger_values) != list:
+        if not isinstance(trigger_values, list):
             raise ex.InputException("invalid type for `trigger_values`")
         if trigger_type == self.GTT_TYPE_SINGLE and len(trigger_values) != 1:
             raise ex.InputException("invalid `trigger_values` for single leg order type")
@@ -964,7 +966,7 @@ class KiteConnect(object):
         # decode to string for Python 3
         d = data
         # Decode unicode data
-        if not PY2 and type(d) == bytes:
+        if not PY2 and isinstance(d, (bytes, bytearray)):
             d = data.decode("utf-8").strip()
 
         records = []
@@ -988,7 +990,7 @@ class KiteConnect(object):
     def _parse_mf_instruments(self, data):
         # decode to string for Python 3
         d = data
-        if not PY2 and type(d) == bytes:
+        if not PY2 and isinstance(d, (bytes, bytearray)):
             d = data.decode("utf-8").strip()
 
         records = []
