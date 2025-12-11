@@ -111,5 +111,8 @@ from __future__ import unicode_literals, absolute_import
 from kiteconnect import exceptions
 from kiteconnect.connect import KiteConnect
 from kiteconnect.ticker import KiteTicker
+from kiteconnect.risk import RiskEngine
+from kiteconnect.monitoring import LatencyTracker, InMemoryLatencySink, LoggingLatencySink
+from kiteconnect.execution import SmartExecution
 
-__all__ = ["KiteConnect", "KiteTicker", "exceptions"]
+__all__ = ["KiteConnect", "KiteTicker", "exceptions", "RiskEngine", "LatencyTracker", "InMemoryLatencySink", "LoggingLatencySink", "SmartExecution"]

@@ -402,7 +402,7 @@ class KiteTicker(object):
 
     def __init__(self, api_key, access_token, debug=False, root=None,
                  reconnect=True, reconnect_max_tries=RECONNECT_MAX_TRIES, reconnect_max_delay=RECONNECT_MAX_DELAY,
-                 connect_timeout=CONNECT_TIMEOUT):
+                 connect_timeout=CONNECT_TIMEOUT, latency_tracker=None):
         """
         Initialise websocket client instance.
 
@@ -465,6 +465,9 @@ class KiteTicker(object):
 
         # Text message updates
         self.on_order_update = None
+
+        # Latency tracker (optional)
+        self.latency_tracker = latency_tracker
 
         # List of current subscribed tokens
         self.subscribed_tokens = {}
@@ -671,8 +674,15 @@ class KiteTicker(object):
             self.on_message(self, payload, is_binary)
 
         # If the message is binary, parse it and send it to the callback.
-        if self.on_ticks and is_binary and len(payload) > 4:
-            self.on_ticks(self, self._parse_binary(payload))
+        if is_binary and len(payload) > 4:
+            ticks = self._parse_binary(payload)
+            if self.latency_tracker:
+                now = time.time()
+                for tick in ticks:
+                    token = tick.get("instrument_token")
+                    self.latency_tracker.mark_tick(token, ts=now)
+            if self.on_ticks:
+                self.on_ticks(self, ticks)
 
         # Parse text messages
         if not is_binary:

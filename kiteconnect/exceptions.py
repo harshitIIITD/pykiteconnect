@@ -56,6 +56,13 @@ class OrderException(KiteException):
         super(OrderException, self).__init__(message, code)
 
 
+class RiskException(OrderException):
+    """Represents pre-trade risk rule violations. Default code is 400."""
+
+    def __init__(self, message, code=400):
+        super(RiskException, self).__init__(message, code)
+
+
 class InputException(KiteException):
     """Represents user input errors such as missing and invalid parameters. Default code is 400."""
 

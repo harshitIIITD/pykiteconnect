@@ -20,6 +20,8 @@ import warnings
 
 from .__version__ import __version__, __title__
 import kiteconnect.exceptions as ex
+from .risk import RiskEngine
+from .monitoring import LatencyTracker
 
 log = logging.getLogger(__name__)
 
@@ -173,7 +175,9 @@ class KiteConnect(object):
                  timeout=None,
                  proxies=None,
                  pool=None,
-                 disable_ssl=False):
+                 disable_ssl=False,
+                 risk_engine=None,
+                 latency_tracker=None):
         """
         Initialise a new Kite Connect client instance.
 
@@ -202,6 +206,12 @@ class KiteConnect(object):
         self.disable_ssl = disable_ssl
         self.access_token = access_token
         self.proxies = proxies if proxies else {}
+        self.risk_engine = risk_engine or RiskEngine()
+        self.latency_tracker = latency_tracker or LatencyTracker()
+
+        # Allow risk engine to fetch LTP via this client when needed.
+        if self.risk_engine and getattr(self.risk_engine, "set_ltp_fetcher", None):
+            self.risk_engine.set_ltp_fetcher(self._ltp_from_api)
 
         self.root = root or self._default_root_uri
         self.timeout = timeout or self._default_timeout
@@ -235,6 +245,16 @@ class KiteConnect(object):
             raise TypeError("Invalid input type. Only functions are accepted.")
 
         self.session_expiry_hook = method
+
+    def set_risk_engine(self, engine):
+        """Attach a custom RiskEngine instance."""
+        if engine and getattr(engine, "set_ltp_fetcher", None):
+            engine.set_ltp_fetcher(self._ltp_from_api)
+        self.risk_engine = engine
+
+    def set_latency_tracker(self, tracker):
+        """Attach a latency tracker instance."""
+        self.latency_tracker = tracker
 
     def set_access_token(self, access_token):
         """Set the `access_token` received after a successful authentication."""
@@ -349,7 +369,9 @@ class KiteConnect(object):
                     iceberg_legs=None,
                     iceberg_quantity=None,
                     auction_number=None,
-                    tag=None):
+                    tag=None,
+                    latency_context=None,
+                    force_risk=False):
         """Place an order."""
         params = locals()
         del (params["self"])
@@ -358,9 +380,12 @@ class KiteConnect(object):
             if params[k] is None:
                 del (params[k])
 
+        self._run_risk_checks(params, force=force_risk)
+
         return self._post("order.place",
                           url_args={"variety": variety},
-                          params=params)["order_id"]
+                          params=params,
+                          latency_context=latency_context)["order_id"]
 
     def modify_order(self,
                      variety,
@@ -371,7 +396,9 @@ class KiteConnect(object):
                      order_type=None,
                      trigger_price=None,
                      validity=None,
-                     disclosed_quantity=None):
+                     disclosed_quantity=None,
+                     latency_context=None,
+                     force_risk=False):
         """Modify an open order."""
         params = locals()
         del (params["self"])
@@ -380,15 +407,19 @@ class KiteConnect(object):
             if params[k] is None:
                 del (params[k])
 
+        self._run_risk_checks(params, force=force_risk)
+
         return self._put("order.modify",
                          url_args={"variety": variety, "order_id": order_id},
-                         params=params)["order_id"]
+                         params=params,
+                         latency_context=latency_context)["order_id"]
 
-    def cancel_order(self, variety, order_id, parent_order_id=None):
+    def cancel_order(self, variety, order_id, parent_order_id=None, latency_context=None):
         """Cancel an order."""
         return self._delete("order.cancel",
                             url_args={"variety": variety, "order_id": order_id},
-                            params={"parent_order_id": parent_order_id})["order_id"]
+                            params={"parent_order_id": parent_order_id},
+                            latency_context=latency_context)["order_id"]
 
     def exit_order(self, variety, order_id, parent_order_id=None):
         """Exit a CO order."""
@@ -737,6 +768,72 @@ class KiteConnect(object):
             "orders": json.dumps(gtt_orders),
             "type": trigger_type})
 
+    def place_order_with_gtt_stop(self,
+                                  variety,
+                                  exchange,
+                                  tradingsymbol,
+                                  transaction_type,
+                                  quantity,
+                                  product,
+                                  order_type,
+                                  entry_price=None,
+                                  stop_price=None,
+                                  stop_loss_percentage=0.01,
+                                  validity=None,
+                                  tag=None,
+                                  latency_context=None,
+                                  force_risk=False):
+        """Place entry order and immediately attach a server-side GTT stop."""
+        order_id = self.place_order(
+            variety=variety,
+            exchange=exchange,
+            tradingsymbol=tradingsymbol,
+            transaction_type=transaction_type,
+            quantity=quantity,
+            product=product,
+            order_type=order_type,
+            price=entry_price,
+            validity=validity,
+            tag=tag,
+            latency_context=latency_context,
+            force_risk=force_risk
+        )
+
+        entry_px = entry_price
+        if entry_px is None:
+            entry_px = self._ltp_from_api(exchange, tradingsymbol)
+
+        if entry_px is None:
+            raise ex.InputException("entry price or LTP required for stop-loss GTT")
+
+        side = self.TRANSACTION_TYPE_BUY if transaction_type == self.TRANSACTION_TYPE_SELL else self.TRANSACTION_TYPE_SELL
+        computed_stop = stop_price
+        if computed_stop is None:
+            if transaction_type == self.TRANSACTION_TYPE_BUY:
+                computed_stop = entry_px * (1 - stop_loss_percentage)
+            else:
+                computed_stop = entry_px * (1 + stop_loss_percentage)
+
+        trigger_values = [round(computed_stop, 2)]
+        gtt_orders = [{
+            "transaction_type": side,
+            "quantity": quantity,
+            "order_type": self.ORDER_TYPE_LIMIT,
+            "product": product,
+            "price": round(computed_stop, 2)
+        }]
+
+        trigger = self.place_gtt(
+            self.GTT_TYPE_SINGLE,
+            tradingsymbol=tradingsymbol,
+            exchange=exchange,
+            trigger_values=trigger_values,
+            last_price=entry_px,
+            orders=gtt_orders
+        )
+
+        return {"order_id": order_id, "gtt": trigger}
+
     def modify_gtt(
         self, trigger_id, trigger_type, tradingsymbol, exchange, trigger_values, last_price, orders
     ):
@@ -801,6 +898,68 @@ class KiteConnect(object):
         warnings.simplefilter('always', DeprecationWarning)
         warnings.warn(message, DeprecationWarning)
 
+    def _run_risk_checks(self, params, force=False):
+        if self.risk_engine:
+            self.risk_engine.evaluate_order(params, force=force)
+
+    def engage_kill_switch(self, cancel_open_orders=True, exit_positions=True):
+        """Engage kill switch: block new trades, cancel opens, flatten positions."""
+        if self.risk_engine:
+            self.risk_engine.engage_kill_switch()
+        if cancel_open_orders:
+            self._cancel_open_orders_for_kill_switch()
+        if exit_positions:
+            self._flatten_positions_for_kill_switch()
+
+    def release_kill_switch(self):
+        if self.risk_engine:
+            self.risk_engine.release_kill_switch()
+
+    def _cancel_open_orders_for_kill_switch(self):
+        try:
+            open_orders = []
+            for order in self.orders():
+                status = order.get("status")
+                if status in [self.STATUS_COMPLETE, self.STATUS_REJECTED, self.STATUS_CANCELLED]:
+                    continue
+                open_orders.append(order)
+
+            for order in open_orders:
+                try:
+                    variety = order.get("variety", self.VARIETY_REGULAR)
+                    parent_order_id = order.get("parent_order_id")
+                    self.cancel_order(variety, order["order_id"], parent_order_id=parent_order_id)
+                except Exception as cancel_err:  # pragma: no cover - best-effort
+                    log.warning("Kill switch cancel failed for %s: %s", order.get("order_id"), cancel_err)
+        except Exception as err:  # pragma: no cover - defensive
+            log.warning("Kill switch cancel sweep failed: %s", err)
+
+    def _flatten_positions_for_kill_switch(self):
+        try:
+            positions = self.positions()
+            for pos in positions.get("net", []):
+                qty = int(pos.get("quantity", 0))
+                if qty == 0:
+                    continue
+                side = self.TRANSACTION_TYPE_SELL if qty > 0 else self.TRANSACTION_TYPE_BUY
+                try:
+                    self.place_order(
+                        variety=self.VARIETY_REGULAR,
+                        exchange=pos.get("exchange"),
+                        tradingsymbol=pos.get("tradingsymbol"),
+                        transaction_type=side,
+                        quantity=abs(qty),
+                        product=pos.get("product", self.PRODUCT_CNC),
+                        order_type=self.ORDER_TYPE_MARKET,
+                        price=None,
+                        tag="kill-switch",
+                        force_risk=True
+                    )
+                except Exception as exit_err:  # pragma: no cover - best-effort
+                    log.warning("Kill switch flatten failed for %s: %s", pos.get("tradingsymbol"), exit_err)
+        except Exception as err:  # pragma: no cover - defensive
+            log.warning("Kill switch flatten sweep failed: %s", err)
+
     def _parse_instruments(self, data):
         # decode to string for Python 3
         d = data
@@ -856,23 +1015,33 @@ class KiteConnect(object):
     def _user_agent(self):
         return (__title__ + "-python/").capitalize() + __version__
 
-    def _get(self, route, url_args=None, params=None, is_json=False):
+    def _ltp_from_api(self, exchange, tradingsymbol):
+        """Fetch LTP for risk checks; returns None on failure."""
+        try:
+            instrument = "%s:%s" % (exchange, tradingsymbol)
+            data = self.ltp(instrument)
+            return data[instrument]["last_price"]
+        except Exception as err:  # pragma: no cover - best-effort helper
+            log.debug("LTP fetch failed: %s", err)
+            return None
+
+    def _get(self, route, url_args=None, params=None, is_json=False, latency_context=None):
         """Alias for sending a GET request."""
-        return self._request(route, "GET", url_args=url_args, params=params, is_json=is_json)
+        return self._request(route, "GET", url_args=url_args, params=params, is_json=is_json, latency_context=latency_context)
 
-    def _post(self, route, url_args=None, params=None, is_json=False, query_params=None):
+    def _post(self, route, url_args=None, params=None, is_json=False, query_params=None, latency_context=None):
         """Alias for sending a POST request."""
-        return self._request(route, "POST", url_args=url_args, params=params, is_json=is_json, query_params=query_params)
+        return self._request(route, "POST", url_args=url_args, params=params, is_json=is_json, query_params=query_params, latency_context=latency_context)
 
-    def _put(self, route, url_args=None, params=None, is_json=False, query_params=None):
+    def _put(self, route, url_args=None, params=None, is_json=False, query_params=None, latency_context=None):
         """Alias for sending a PUT request."""
-        return self._request(route, "PUT", url_args=url_args, params=params, is_json=is_json, query_params=query_params)
+        return self._request(route, "PUT", url_args=url_args, params=params, is_json=is_json, query_params=query_params, latency_context=latency_context)
 
-    def _delete(self, route, url_args=None, params=None, is_json=False):
+    def _delete(self, route, url_args=None, params=None, is_json=False, latency_context=None):
         """Alias for sending a DELETE request."""
-        return self._request(route, "DELETE", url_args=url_args, params=params, is_json=is_json)
+        return self._request(route, "DELETE", url_args=url_args, params=params, is_json=is_json, latency_context=latency_context)
 
-    def _request(self, route, method, url_args=None, params=None, is_json=False, query_params=None):
+    def _request(self, route, method, url_args=None, params=None, is_json=False, query_params=None, latency_context=None):
         """Make an HTTP request."""
         # Form a restful URL
         if url_args:
@@ -899,6 +1068,15 @@ class KiteConnect(object):
         # prepare url query params
         if method in ["GET", "DELETE"]:
             query_params = params
+
+        is_order_route = route.startswith("order.")
+        latency_context = latency_context or {}
+        t1 = latency_context.get("t1")
+        t2 = latency_context.get("t2")
+        event_id = latency_context.get("event_id", route)
+        t3 = None
+        if self.latency_tracker and is_order_route:
+            t3 = self.latency_tracker.mark_order_send(event_id=event_id, t1=t1, t2=t2, meta={"route": route})
 
         try:
             r = self.reqsession.request(method,
@@ -936,7 +1114,11 @@ class KiteConnect(object):
                 exp = getattr(ex, data.get("error_type"), ex.GeneralException)
                 raise exp(data["message"], code=r.status_code)
 
-            return data["data"]
+            payload = data["data"]
+            if self.latency_tracker and is_order_route:
+                order_id = payload.get("order_id") if isinstance(payload, dict) else None
+                self.latency_tracker.mark_order_confirm(event_id=event_id or order_id, t1=t1, t2=t2, t3=t3, meta={"route": route, "order_id": order_id})
+            return payload
         elif "csv" in r.headers["content-type"]:
             return r.content
         else:
